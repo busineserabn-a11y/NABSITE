@@ -1,0 +1,6 @@
+{
+  "name": "NABSITE",
+  "description": "Managed digital identity, company discovery, and website creation platform with Website Studio, 24 themes, multi-tenant company workspaces, and Owner God Mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
