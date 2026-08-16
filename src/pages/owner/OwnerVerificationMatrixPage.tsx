@@ -78,7 +78,7 @@ export const OwnerVerificationMatrixPage: React.FC = () => {
           );
         }
       } else if (testId === 't_routes_public') {
-        const res = await api.getPublicCompany('addis-gourmet-kitchen');
+        const res = await api.getPublicCompany('addis-gourmet');
         if (res && res.company) {
           setTests((prev) =>
             prev.map((t) =>

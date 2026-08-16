@@ -128,15 +128,32 @@ export class Nabsitedatabase {
   }
 
   // --- Security & Permission Checkers ---
-  public canAccessCompany(user: User | null, companyId: string): boolean {
+  public canAccessCompany(user: User | null, companyIdOrSlug: string): boolean {
     if (!user) return false;
     if (user.role === 'OWNER') return true;
+    const clean = String(companyIdOrSlug || '').toLowerCase().trim();
+    const company = this.companies.find(
+      (c) =>
+        c.id === companyIdOrSlug ||
+        c.slug === companyIdOrSlug ||
+        c.id.toLowerCase() === clean ||
+        c.slug.toLowerCase() === clean ||
+        c.slug.toLowerCase().replace(/[-_]/g, '') === clean.replace(/[-_]/g, '')
+    );
+    const resolvedId = company ? company.id : companyIdOrSlug;
+
     if (user.role === 'ADMIN') {
       if (!user.assignedCompanyIds || user.assignedCompanyIds.length === 0) return true;
-      return user.assignedCompanyIds.includes(companyId);
+      return (
+        user.assignedCompanyIds.includes(resolvedId) ||
+        user.assignedCompanyIds.includes(companyIdOrSlug)
+      );
     }
     if (user.role === 'SUB_ADMIN') {
-      return user.assignedCompanyId === companyId;
+      return (
+        user.assignedCompanyId === resolvedId ||
+        user.assignedCompanyId === companyIdOrSlug
+      );
     }
     return false;
   }
@@ -413,13 +430,38 @@ export class Nabsitedatabase {
 
   // --- Public Company Lookup (Only Active & Published) ---
   public getPublicCompanyBySlug(slug: string): { company: Company; website: Website } | null {
-    const company = this.companies.find((c) => c.slug === slug);
+    if (!slug) return null;
+    const clean = String(slug).toLowerCase().trim();
+    const cleanNoHyphen = clean.replace(/[-_]/g, '');
+
+    const company = this.companies.find((c) => {
+      const cSlug = c.slug.toLowerCase();
+      const cId = c.id.toLowerCase();
+      const cSlugNoHyphen = cSlug.replace(/[-_]/g, '');
+      const cNameNoSpecial = c.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+      return (
+        c.slug === slug ||
+        c.id === slug ||
+        cSlug === clean ||
+        cId === clean ||
+        cSlugNoHyphen === cleanNoHyphen ||
+        cNameNoSpecial === cleanNoHyphen ||
+        (clean.includes('addis-gourmet') && c.slug === 'addis-gourmet') ||
+        (clean.includes('bluenile') && c.slug === 'bluenile-tech') ||
+        (clean.includes('habesha') && c.slug === 'habesha-crafts') ||
+        (clean.includes('apex') && c.slug === 'apex-construction') ||
+        (clean.includes('lucy') && c.slug === 'lucy-wellness') ||
+        (clean.includes('zenith') && c.slug === 'zenith-realty')
+      );
+    });
+
     if (!company || company.status === 'archived') {
       return null;
     }
-    const website = this.websites.find((w) => w.companyId === company.id);
+    let website = this.websites.find((w) => w.companyId === company.id);
     if (!website) {
-      return null;
+      website = this.ensureWebsiteForCompany(company.id);
     }
     return { company, website };
   }

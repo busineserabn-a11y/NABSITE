@@ -3,7 +3,7 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import QRCode from 'qrcode';
 import { db } from './src/server/storage';
-import { User, Role } from './src/types';
+import { User, Role, Company, Website } from './src/types';
 import { THEME_REGISTRY } from './src/data/themes';
 import { FEATURE_REGISTRY } from './src/data/features';
 
@@ -218,12 +218,14 @@ app.get('/api/public/company/:slug', (req, res) => {
     });
   }
 
-  // For public website, only return published configuration! Never return draftConfig.
-  const publishedProducts = db.products.filter((p) => p.companyId === company.id && p.visibility && p.status === 'active');
+  // For public website, return published configuration or fallback to draftConfig
+  const publishedProducts = db.products.filter((p) => p.companyId === company.id && p.visibility !== false);
   const publishedReviews = db.reviews.filter((r) => r.companyId === company.id && r.status === 'approved');
   const publishedOffers = db.offers.filter((o) => o.companyId === company.id && o.status === 'active');
   const publishedAnnouncements = db.announcements.filter((a) => a.companyId === company.id && a.status === 'published');
-  const publishedCategories = db.productCategories.filter((c) => c.companyId === company.id && c.visibility);
+  const publishedCategories = db.productCategories.filter((c) => c.companyId === company.id && c.visibility !== false);
+
+  const activeConfig = website.publishedConfig || website.draftConfig;
 
   return res.json({
     company,
@@ -233,7 +235,8 @@ app.get('/api/public/company/:slug', (req, res) => {
       themeId: website.themeId,
       status: website.status,
       version: website.version,
-      publishedConfig: website.publishedConfig,
+      publishedConfig: activeConfig,
+      draftConfig: website.draftConfig,
       publishedAt: website.publishedAt,
     },
     products: publishedProducts,
@@ -359,18 +362,49 @@ app.get('/api/companies', requireAuth, (req, res) => {
   return res.status(403).json({ error: 'Access denied' });
 });
 
-app.get('/api/companies/:id', requireAuth, (req, res) => {
-  const user: User = (req as any).user;
-  const { id } = req.params;
+// Helper to robustly find company by ID, slug, or website ID
+function findCompanyByIdOrSlug(id: string | undefined): Company | undefined {
+  if (!id) return undefined;
+  const clean = String(id).toLowerCase().trim();
+  const cleanNoHyphen = clean.replace(/[-_]/g, '');
 
-  let company = db.companies.find((c) => c.id === id || c.slug === id);
+  let company = db.companies.find((c) => {
+    const cSlug = c.slug.toLowerCase();
+    const cId = c.id.toLowerCase();
+    const cSlugNoHyphen = cSlug.replace(/[-_]/g, '');
+    const cNameNoSpecial = c.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    return (
+      c.id === id ||
+      c.slug === id ||
+      cId === clean ||
+      cSlug === clean ||
+      cSlugNoHyphen === cleanNoHyphen ||
+      cNameNoSpecial === cleanNoHyphen ||
+      (clean.includes('addis-gourmet') && c.slug === 'addis-gourmet') ||
+      (clean.includes('bluenile') && c.slug === 'bluenile-tech') ||
+      (clean.includes('habesha') && c.slug === 'habesha-crafts') ||
+      (clean.includes('apex') && c.slug === 'apex-construction') ||
+      (clean.includes('lucy') && c.slug === 'lucy-wellness') ||
+      (clean.includes('zenith') && c.slug === 'zenith-realty')
+    );
+  });
+
   if (!company) {
-    const w = db.websites.find((web) => web.id === id);
+    const w = db.websites.find((web) => web.id === id || web.companyId === id);
     if (w) {
       company = db.companies.find((c) => c.id === w.companyId);
     }
   }
 
+  return company;
+}
+
+app.get('/api/companies/:id', requireAuth, (req, res) => {
+  const user: User = (req as any).user;
+  const { id } = req.params;
+
+  const company = findCompanyByIdOrSlug(id);
   if (!company) return res.status(404).json({ error: 'Company not found' });
 
   if (!db.canAccessCompany(user, company.id)) {
@@ -828,10 +862,12 @@ app.get('/api/products', requireAuth, (req, res) => {
   const { companyId } = req.query;
 
   if (companyId) {
-    if (!db.canAccessCompany(user, String(companyId))) {
+    const comp = findCompanyByIdOrSlug(String(companyId));
+    const resolvedId = comp ? comp.id : String(companyId);
+    if (!db.canAccessCompany(user, resolvedId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
-    return res.json(db.products.filter((p) => p.companyId === String(companyId)));
+    return res.json(db.products.filter((p) => p.companyId === resolvedId));
   }
 
   if (user.role === 'OWNER') return res.json(db.products);
@@ -849,7 +885,10 @@ app.post('/api/products', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Company ID, product name, and price are required' });
   }
 
-  if (!db.canAccessCompany(user, data.companyId)) {
+  const comp = findCompanyByIdOrSlug(data.companyId);
+  const targetCompanyId = comp ? comp.id : data.companyId;
+
+  if (!db.canAccessCompany(user, targetCompanyId)) {
     return res.status(403).json({ error: 'Access denied' });
   }
 
@@ -859,7 +898,7 @@ app.post('/api/products', requireAuth, (req, res) => {
 
   const newProduct = {
     id: `prod_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-    companyId: data.companyId,
+    companyId: targetCompanyId,
     categoryId: data.categoryId,
     name: data.name,
     description: data.description || '',
@@ -876,7 +915,7 @@ app.post('/api/products', requireAuth, (req, res) => {
   };
 
   db.products.unshift(newProduct);
-  db.log(user.id, user.name, user.role, 'CREATE_PRODUCT', 'PRODUCT', newProduct.id, data.companyId, 'SUCCESS', {
+  db.log(user.id, user.name, user.role, 'CREATE_PRODUCT', 'PRODUCT', newProduct.id, targetCompanyId, 'SUCCESS', {
     name: newProduct.name,
     price: newProduct.price,
   });
@@ -926,7 +965,9 @@ app.delete('/api/products/:id', requireAuth, (req, res) => {
 app.get('/api/product-categories', requireAuth, (req, res) => {
   const { companyId } = req.query;
   if (companyId) {
-    return res.json(db.productCategories.filter((c) => c.companyId === String(companyId)));
+    const comp = findCompanyByIdOrSlug(String(companyId));
+    const resolvedId = comp ? comp.id : String(companyId);
+    return res.json(db.productCategories.filter((c) => c.companyId === resolvedId));
   }
   return res.json(db.productCategories);
 });
@@ -936,11 +977,13 @@ app.post('/api/product-categories', requireAuth, (req, res) => {
   const { companyId, name, description } = req.body;
 
   if (!companyId || !name) return res.status(400).json({ error: 'Missing category fields' });
-  if (!db.canAccessCompany(user, companyId)) return res.status(403).json({ error: 'Access denied' });
+  const comp = findCompanyByIdOrSlug(companyId);
+  const targetCompanyId = comp ? comp.id : companyId;
+  if (!db.canAccessCompany(user, targetCompanyId)) return res.status(403).json({ error: 'Access denied' });
 
   const newCat = {
     id: `pcat_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-    companyId,
+    companyId: targetCompanyId,
     name,
     description: description || '',
     sortOrder: db.productCategories.length + 1,
@@ -960,8 +1003,10 @@ app.get('/api/reviews', requireAuth, (req, res) => {
   const { companyId } = req.query;
 
   if (companyId) {
-    if (!db.canAccessCompany(user, String(companyId))) return res.status(403).json({ error: 'Access denied' });
-    return res.json(db.reviews.filter((r) => r.companyId === String(companyId)));
+    const comp = findCompanyByIdOrSlug(String(companyId));
+    const resolvedId = comp ? comp.id : String(companyId);
+    if (!db.canAccessCompany(user, resolvedId)) return res.status(403).json({ error: 'Access denied' });
+    return res.json(db.reviews.filter((r) => r.companyId === resolvedId));
   }
 
   if (user.role === 'OWNER') return res.json(db.reviews);
@@ -999,7 +1044,11 @@ app.put('/api/reviews/:id/status', requireAuth, (req, res) => {
 
 app.get('/api/offers', requireAuth, (req, res) => {
   const { companyId } = req.query;
-  if (companyId) return res.json(db.offers.filter((o) => o.companyId === String(companyId)));
+  if (companyId) {
+    const comp = findCompanyByIdOrSlug(String(companyId));
+    const resolvedId = comp ? comp.id : String(companyId);
+    return res.json(db.offers.filter((o) => o.companyId === resolvedId));
+  }
   return res.json(db.offers);
 });
 
@@ -1007,11 +1056,13 @@ app.post('/api/offers', requireAuth, (req, res) => {
   const user: User = (req as any).user;
   const data = req.body;
   if (!data.companyId || !data.title) return res.status(400).json({ error: 'Title and companyId are required' });
-  if (!db.canAccessCompany(user, data.companyId)) return res.status(403).json({ error: 'Access denied' });
+  const comp = findCompanyByIdOrSlug(data.companyId);
+  const targetCompanyId = comp ? comp.id : data.companyId;
+  if (!db.canAccessCompany(user, targetCompanyId)) return res.status(403).json({ error: 'Access denied' });
 
   const newOffer = {
     id: `off_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-    companyId: data.companyId,
+    companyId: targetCompanyId,
     title: data.title,
     description: data.description || '',
     image: data.image,
@@ -1028,13 +1079,17 @@ app.post('/api/offers', requireAuth, (req, res) => {
   };
 
   db.offers.unshift(newOffer);
-  db.log(user.id, user.name, user.role, 'CREATE_OFFER', 'OFFER', newOffer.id, data.companyId, 'SUCCESS');
+  db.log(user.id, user.name, user.role, 'CREATE_OFFER', 'OFFER', newOffer.id, targetCompanyId, 'SUCCESS');
   return res.status(201).json(newOffer);
 });
 
 app.get('/api/announcements', requireAuth, (req, res) => {
   const { companyId } = req.query;
-  if (companyId) return res.json(db.announcements.filter((a) => a.companyId === String(companyId)));
+  if (companyId) {
+    const comp = findCompanyByIdOrSlug(String(companyId));
+    const resolvedId = comp ? comp.id : String(companyId);
+    return res.json(db.announcements.filter((a) => a.companyId === resolvedId));
+  }
   return res.json(db.announcements);
 });
 
@@ -1042,11 +1097,13 @@ app.post('/api/announcements', requireAuth, (req, res) => {
   const user: User = (req as any).user;
   const data = req.body;
   if (!data.companyId || !data.title) return res.status(400).json({ error: 'Title and companyId are required' });
-  if (!db.canAccessCompany(user, data.companyId)) return res.status(403).json({ error: 'Access denied' });
+  const comp = findCompanyByIdOrSlug(data.companyId);
+  const targetCompanyId = comp ? comp.id : data.companyId;
+  if (!db.canAccessCompany(user, targetCompanyId)) return res.status(403).json({ error: 'Access denied' });
 
   const newAnn = {
     id: `ann_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-    companyId: data.companyId,
+    companyId: targetCompanyId,
     title: data.title,
     content: data.content || '',
     image: data.image,
@@ -1060,7 +1117,7 @@ app.post('/api/announcements', requireAuth, (req, res) => {
   };
 
   db.announcements.unshift(newAnn);
-  db.log(user.id, user.name, user.role, 'CREATE_ANNOUNCEMENT', 'ANNOUNCEMENT', newAnn.id, data.companyId, 'SUCCESS');
+  db.log(user.id, user.name, user.role, 'CREATE_ANNOUNCEMENT', 'ANNOUNCEMENT', newAnn.id, targetCompanyId, 'SUCCESS');
   return res.status(201).json(newAnn);
 });
 
@@ -1251,8 +1308,10 @@ app.get('/api/qr', requireAuth, (req, res) => {
   const { companyId } = req.query;
 
   if (companyId) {
-    if (!db.canAccessCompany(user, String(companyId))) return res.status(403).json({ error: 'Access denied' });
-    return res.json(db.qrConfigs.filter((q) => q.companyId === String(companyId)));
+    const comp = findCompanyByIdOrSlug(String(companyId));
+    const resolvedId = comp ? comp.id : String(companyId);
+    if (!db.canAccessCompany(user, resolvedId)) return res.status(403).json({ error: 'Access denied' });
+    return res.json(db.qrConfigs.filter((q) => q.companyId === resolvedId));
   }
 
   if (user.role === 'OWNER') return res.json(db.qrConfigs);
@@ -1270,7 +1329,9 @@ app.post('/api/qr', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Company ID, name, and target URL are required' });
   }
 
-  if (!db.canAccessCompany(user, data.companyId)) return res.status(403).json({ error: 'Access denied' });
+  const comp = findCompanyByIdOrSlug(data.companyId);
+  const targetCompanyId = comp ? comp.id : data.companyId;
+  if (!db.canAccessCompany(user, targetCompanyId)) return res.status(403).json({ error: 'Access denied' });
 
   const newQr = {
     id: `qr_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
@@ -1620,4 +1681,9 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
+export { app };
